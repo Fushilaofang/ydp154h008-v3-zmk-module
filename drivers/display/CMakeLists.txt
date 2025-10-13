@@ -1,6 +1,2 @@
-zephyr_library_amend()
-set_source_files_properties(
-        ${ZEPHYR_BASE}/drivers/display/display_st730x.c
-        TARGET_DIRECTORY ${lib_name}
-        PROPERTIES HEADER_FILE_ONLY ON)
-zephyr_library_sources(display_st730x.c)
+zephyr_library()
+zephyr_library_sources_ifdef(CONFIG_ST730X		display_st730x.c)

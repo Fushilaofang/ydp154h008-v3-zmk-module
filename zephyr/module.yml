@@ -1,0 +1,6 @@
+name: ydp154h008-v3-zmk-module
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    board_root: .

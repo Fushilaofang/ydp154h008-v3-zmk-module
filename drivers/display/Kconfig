@@ -1,0 +1,19 @@
+menuconfig DISPLAY
+	bool "Display controller drivers"
+	help
+	  Enable display drivers
+
+if DISPLAY
+
+config DISPLAY_INIT_PRIORITY
+	int "Display devices init priority"
+	default 85
+	help
+	  Display devices initialization priority.
+
+module = DISPLAY
+module-str = display
+
+source "drivers/display/Kconfig.st730x"
+
+endif # DISPLAY

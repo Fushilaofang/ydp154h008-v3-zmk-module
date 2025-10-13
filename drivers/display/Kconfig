@@ -14,6 +14,6 @@ config DISPLAY_INIT_PRIORITY
 module = DISPLAY
 module-str = display
 
-source "drivers/display/Kconfig.st730x"
+source "Kconfig.st730x"
 
 endif # DISPLAY

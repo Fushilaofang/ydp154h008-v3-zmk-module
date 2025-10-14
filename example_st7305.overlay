@@ -1,0 +1,41 @@
+/*
+ * Example device tree overlay for ST7305 display using the refactored driver
+ * This shows how to configure the ST7305 display with direct SPI instead of MIPI-DBI
+ */
+
+&spi1 {
+    status = "okay";
+    
+    st7305: st7305@0 {
+        compatible = "sitronix,st7305";
+        reg = <0>;
+        spi-max-frequency = <4000000>;
+        
+        /* GPIO pins for command/data control and reset */
+        cmd-data-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpio0 26 GPIO_ACTIVE_LOW>;
+        
+        /* Display properties */
+        width = <168>;
+        height = <64>;
+        start-line = <0>;
+        start-column = <0>;
+        
+        /* Hardware configuration */
+        nvm-load = [A5 A5];
+        gate-voltages = [0F 1F];
+        vsh = [08 0A 0C 0E];
+        vsl = [08 0A 0C 0E];
+        vshn = [08 0A 0C 0E];
+        vsln = [08 0A 0C 0E];
+        osc-settings = <0x85>;
+        framerate = <0x11>;
+        multiplex-ratio = <16>;
+        source-voltage = <0>;
+        remap-value = <0>;
+        panel-settings = <0x00>;
+        
+        /* Optional inversion control */
+        inversion-on;
+    };
+};

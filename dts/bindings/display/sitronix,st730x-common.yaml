@@ -10,9 +10,17 @@ description: |
     necessitate rounding X axis values to 12, including width which sometimes need
     to be rounded to the next multiple of 12 to fill the display.
 
-include: [mipi-dbi-spi-device.yaml, display-controller.yaml]
+include: [spi-device.yaml, display-controller.yaml]
 
 properties:
+  dc-gpios:
+    type: phandle-array
+    description: GPIO for command/data selection (DC pin)
+
+  reset-gpios:
+    type: phandle-array
+    description: GPIO for reset control
+
   start-line:
     type: int
     required: true

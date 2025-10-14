@@ -13,8 +13,9 @@ LOG_MODULE_REGISTER(st730x, CONFIG_DISPLAY_LOG_LEVEL);
 #include <zephyr/init.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/mipi_dbi.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 
 /* Registers */
 #define ST730X_SLEEP_IN			0x10
@@ -67,6 +68,8 @@ LOG_MODULE_REGISTER(st730x, CONFIG_DISPLAY_LOG_LEVEL);
 #define ST730X_OSC_SETTINGS		0xD8
 #define ST730X_OSC_SETTINGS_BYTE2	0xE9
 
+#define ST730X_CMD_NONE			0xff
+
 #define ST730X_HPM_GATE_WAVEFORM_LEN 10
 #define ST730X_LPM_GATE_WAVEFORM_LEN 8
 
@@ -95,8 +98,9 @@ struct st730x_specific {
 };
 
 struct st730x_config {
-	const struct device *mipi_dev;
-	const struct mipi_dbi_config dbi_config;
+	struct spi_dt_spec bus;
+	struct gpio_dt_spec cmd_data_gpio;
+	struct gpio_dt_spec reset_gpio;
 	const struct st730x_specific *specifics;
 	uint16_t height;
 	uint16_t width;
@@ -121,189 +125,139 @@ struct st730x_config {
 	size_t conversion_buf_size;
 };
 
-static int st730x_resume(const struct device *dev)
+static void st730x_transmit(const struct device *dev, uint8_t cmd, uint8_t *tx_data,
+			     size_t tx_count)
 {
 	const struct st730x_config *config = dev->config;
-	int err;
+	uint16_t data = cmd;
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_SLEEP_OUT,
-				     NULL, 0);
-	if (err < 0) {
-		return err;
+	struct spi_buf tx_buf = {.buf = &cmd, .len = 1};
+	struct spi_buf_set tx_bufs = {.buffers = &tx_buf, .count = 1};
+
+	if (config->cmd_data_gpio.port != NULL) {
+		if (cmd != ST730X_CMD_NONE) {
+			gpio_pin_set_dt(&config->cmd_data_gpio, 1);
+			spi_write_dt(&config->bus, &tx_bufs);
+		}
+
+		if (tx_data != NULL) {
+			tx_buf.buf = tx_data;
+			tx_buf.len = tx_count;
+			gpio_pin_set_dt(&config->cmd_data_gpio, 0);
+			spi_write_dt(&config->bus, &tx_bufs);
+		}
+	} else {
+		tx_buf.buf = &data;
+		tx_buf.len = 2;
+
+		if (cmd != ST730X_CMD_NONE) {
+			spi_write_dt(&config->bus, &tx_bufs);
+		}
+
+		if (tx_data != NULL) {
+			for (size_t index = 0; index < tx_count; ++index) {
+				data = 0x0100 | tx_data[index];
+				spi_write_dt(&config->bus, &tx_bufs);
+			}
+		}
 	}
+}
+
+static void st730x_reset_display(const struct device *dev)
+{
+	LOG_DBG("Resetting display");
+
+	const struct st730x_config *config = dev->config;
+	if (config->reset_gpio.port != NULL) {
+		k_sleep(K_MSEC(1));
+		gpio_pin_set_dt(&config->reset_gpio, 1);
+		k_sleep(K_MSEC(6));
+		gpio_pin_set_dt(&config->reset_gpio, 0);
+		k_sleep(K_MSEC(20));
+	}
+}
+
+static int st730x_resume(const struct device *dev)
+{
+	st730x_transmit(dev, ST730X_SLEEP_OUT, NULL, 0);
 	k_msleep(ST730X_SLEEP_DELAY);
 
 	/* Also enable display */
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_DISPLAY_ON,
-				     NULL, 0);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_DISPLAY_ON, NULL, 0);
 
-	return mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+	return 0;
 }
 
 static int st730x_suspend(const struct device *dev)
 {
-	const struct st730x_config *config = dev->config;
-	int err;
-
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_SLEEP_IN,
-				     NULL, 0);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_SLEEP_IN, NULL, 0);
 	k_msleep(ST730X_SLEEP_DELAY);
 
-	return mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+	return 0;
 }
 
 static inline int st730x_set_hardware_config(const struct device *dev)
 {
 	const struct st730x_config *config = dev->config;
-	int err;
 	uint8_t tmp[2];
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_NVM_LOAD, config->nvm_load, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_NVM_LOAD, (uint8_t *)config->nvm_load, 2);
 
 	tmp[0] = ST730X_BOOSTER_EN_ENABLE;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_BOOSTER_EN, tmp,
-				     1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_BOOSTER_EN, tmp, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_GATE_VOLTAGE, config->gate_voltages, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_GATE_VOLTAGE, (uint8_t *)config->gate_voltages, 2);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_VSH, config->vsh, 4);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_VSH, (uint8_t *)config->vsh, 4);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_VSL, config->vsl, 4);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_VSL, (uint8_t *)config->vsl, 4);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_VSHN, config->vshn, 4);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_VSHN, (uint8_t *)config->vshn, 4);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_VSLN, config->vsln, 4);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_VSLN, (uint8_t *)config->vsln, 4);
 
 	tmp[0] = config->osc_settings;
 	tmp[1] = ST730X_OSC_SETTINGS_BYTE2;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_OSC_SETTINGS, tmp, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_OSC_SETTINGS, tmp, 2);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_FRAMERATE, &config->framerate, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_FRAMERATE, (uint8_t *)&config->framerate, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_HPM_GATE_WAVEFORM, config->hpm_gate_waveform,
-				     ST730X_HPM_GATE_WAVEFORM_LEN);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_HPM_GATE_WAVEFORM, (uint8_t *)config->hpm_gate_waveform,
+			 ST730X_HPM_GATE_WAVEFORM_LEN);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_LPM_GATE_WAVEFORM, config->lpm_gate_waveform,
-				     ST730X_LPM_GATE_WAVEFORM_LEN);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_LPM_GATE_WAVEFORM, (uint8_t *)config->lpm_gate_waveform,
+			 ST730X_LPM_GATE_WAVEFORM_LEN);
 
 	tmp[0] = ST730X_SOURCE_EQ_EN_ENABLE;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_SOURCE_EQ_EN, tmp, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_SOURCE_EQ_EN, tmp, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_GATESET, &config->multiplex_ratio, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_GATESET, (uint8_t *)&config->multiplex_ratio, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_VSHLSEL, &config->source_voltage, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_VSHLSEL, (uint8_t *)&config->source_voltage, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_MADCTL, &config->remap_value, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_MADCTL, (uint8_t *)&config->remap_value, 1);
 
 	tmp[0] = ST730X_DTFORM_3W_24B;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_DTFORM, tmp, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_DTFORM, tmp, 1);
 
 	tmp[0] = ST730X_GAMAMS_MONO;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_GAMAMS, tmp, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_GAMAMS, tmp, 1);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_PNLSET, &config->panel_settings, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_PNLSET, (uint8_t *)&config->panel_settings, 1);
 
 	tmp[0] = ST730X_TEARING_OUT_VBLANK;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_TEARING_OUT, tmp, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_TEARING_OUT, tmp, 1);
 
 	tmp[0] = ST730X_AUTOPWRDOWN_ON;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_AUTOPWRDOWN, tmp, 1);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_AUTOPWRDOWN, tmp, 1);
 
 	tmp[0] = (config->start_line & 0x100) >> 8;
 	tmp[1] = config->start_line & 0xFF;
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_FIRSTGATE, tmp, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_FIRSTGATE, tmp, 2);
 
-	return mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     ST730X_POWER_MODE, NULL, 0);
+	st730x_transmit(dev, ST730X_POWER_MODE, NULL, 0);
+
+	return 0;
 }
 
 /* Convert what the conversion buffer can hold to the st730x format */
@@ -357,7 +311,7 @@ static int st730x_write(const struct device *dev, const uint16_t x, const uint16
 	size_t buf_len;
 	uint32_t processed = 0;
 	int i;
-	struct display_buffer_descriptor mipi_desc = *desc;
+	struct display_buffer_descriptor write_desc = *desc;
 	uint8_t x_start = config->specifics->column_offset + (config->start_column + x)
 			  / ST730X_PPXA;
 	uint8_t x_end = config->specifics->column_offset
@@ -389,22 +343,11 @@ static int st730x_write(const struct device *dev, const uint16_t x, const uint16
 	LOG_DBG("x %u, y %u, pitch %u, width %u, height %u, buf_len %u", x, y, desc->pitch,
 		desc->width, desc->height, buf_len);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_SET_COLUMN_ADDR,
-				     x_position, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_SET_COLUMN_ADDR, x_position, 2);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_SET_ROW_ADDR,
-				     y_position, 2);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_SET_ROW_ADDR, y_position, 2);
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config, ST730X_WRITE, NULL, 0);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, ST730X_WRITE, NULL, 0);
 
 	while (desc->height > processed) {
 		i = st730x_convert(dev, buf, processed, desc);
@@ -413,20 +356,13 @@ static int st730x_write(const struct device *dev, const uint16_t x, const uint16
 			return i;
 		}
 
-		mipi_desc.buf_size = i * desc->width / ST730X_PPB;
-		mipi_desc.width = desc->width;
-		mipi_desc.height = i;
-
-		err = mipi_dbi_write_display(config->mipi_dev, &config->dbi_config,
-						config->conversion_buf, &mipi_desc,
-						PIXEL_FORMAT_MONO01);
-		if (err < 0) {
-			return err;
-		}
+		/* Write pixel data directly using SPI */
+		st730x_transmit(dev, ST730X_CMD_NONE, config->conversion_buf, 
+				 i * desc->width / ST730X_PPB);
 		processed += i;
 	}
 
-	return mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+	return 0;
 }
 
 static void st730x_get_capabilities(const struct device *dev, struct display_capabilities *caps)
@@ -466,20 +402,16 @@ static int st730x_init_device(const struct device *dev)
 		return err;
 	}
 
-	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
-				     config->color_inversion ? ST730X_SET_REVERSE_DISPLAY
-							     : ST730X_SET_NORMAL_DISPLAY,
-				     NULL, 0);
-	if (err < 0) {
-		return err;
-	}
+	st730x_transmit(dev, config->color_inversion ? ST730X_SET_REVERSE_DISPLAY
+						     : ST730X_SET_NORMAL_DISPLAY,
+			 NULL, 0);
 
 	err = st730x_resume(dev);
 	if (err < 0) {
 		return err;
 	}
 
-	return mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+	return 0;
 }
 
 static int st730x_init(const struct device *dev)
@@ -489,16 +421,36 @@ static int st730x_init(const struct device *dev)
 
 	LOG_DBG("Initializing device");
 
-	if (!device_is_ready(config->mipi_dev)) {
-		LOG_ERR("MIPI Device not ready!");
+	if (!spi_is_ready_dt(&config->bus)) {
+		LOG_ERR("SPI device not ready");
 		return -ENODEV;
 	}
 
-	err = mipi_dbi_reset(config->mipi_dev, ST730X_RESET_DELAY);
-	if (err < 0) {
-		LOG_ERR("Failed to reset device!");
-		return err;
+	if (config->reset_gpio.port != NULL) {
+		if (!gpio_is_ready_dt(&config->reset_gpio)) {
+			LOG_ERR("Reset GPIO device not ready");
+			return -ENODEV;
+		}
+
+		if (gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_INACTIVE)) {
+			LOG_ERR("Couldn't configure reset pin");
+			return -EIO;
+		}
 	}
+
+	if (config->cmd_data_gpio.port != NULL) {
+		if (!gpio_is_ready_dt(&config->cmd_data_gpio)) {
+			LOG_ERR("CMD/DATA GPIO device not ready");
+			return -ENODEV;
+		}
+
+		if (gpio_pin_configure_dt(&config->cmd_data_gpio, GPIO_OUTPUT)) {
+			LOG_ERR("Couldn't configure CMD/DATA pin");
+			return -EIO;
+		}
+	}
+
+	st730x_reset_display(dev);
 
 	err = st730x_init_device(dev);
 	if (err < 0) {
@@ -529,20 +481,19 @@ static const struct st730x_specific st7306_specifics = {
 };
 #endif
 
-#define ST730X_WORD_SIZE(inst)                                                                     \
-	((DT_STRING_UPPER_TOKEN(inst, mipi_mode) == MIPI_DBI_MODE_SPI_4WIRE) ? SPI_WORD_SET(8)     \
-									     : SPI_WORD_SET(9))
+#define ST730X_WORD_SIZE(node_id) COND_CODE_1(DT_NODE_HAS_PROP(node_id, cmd_data_gpios), (8), (9))
 
 #define ST730X_CONV_BUFFER_SIZE(node_id)                                                           \
 	ROUND_UP(DT_PROP(node_id, width) * CONFIG_ST730X_CONV_BUFFER_LINE_CNT,                     \
 		     DT_PROP(node_id, width))
 
-#define ST730X_DEFINE_MIPI(node_id, specifics_ptr)                                                 \
+#define ST730X_DEFINE_DEVICE(node_id, specifics_ptr)                                                \
 	static uint8_t conversion_buf##node_id[ST730X_CONV_BUFFER_SIZE(node_id)];                  \
 	static const struct st730x_config config##node_id = {                                      \
-		.mipi_dev = DEVICE_DT_GET(DT_PARENT(node_id)),                                     \
-		.dbi_config = MIPI_DBI_CONFIG_DT(                                                  \
-			node_id, ST730X_WORD_SIZE(node_id) | SPI_OP_MODE_MASTER, 0),               \
+		.bus = SPI_DT_SPEC_GET(node_id,                                                    \
+			SPI_OP_MODE_MASTER | SPI_WORD_SET(ST730X_WORD_SIZE(node_id)), 0),                                  \
+		.cmd_data_gpio = GPIO_DT_SPEC_GET_OR(node_id, cmd_data_gpios, {}),                 \
+		.reset_gpio = GPIO_DT_SPEC_GET_OR(node_id, reset_gpios, {}),                  \
 		.height = DT_PROP(node_id, height),                                                \
 		.width = DT_PROP(node_id, width),                                                  \
 		.start_line = DT_PROP(node_id, start_line),                                        \
@@ -569,5 +520,5 @@ static const struct st730x_specific st7306_specifics = {
 	DEVICE_DT_DEFINE(node_id, st730x_init, NULL, NULL, &config##node_id,                       \
 			 POST_KERNEL, CONFIG_DISPLAY_INIT_PRIORITY, &st730x_driver_api);
 
-DT_FOREACH_STATUS_OKAY_VARGS(sitronix_st7305, ST730X_DEFINE_MIPI, &st7305_specifics)
-DT_FOREACH_STATUS_OKAY_VARGS(sitronix_st7306, ST730X_DEFINE_MIPI, &st7306_specifics)
+DT_FOREACH_STATUS_OKAY_VARGS(sitronix_st7305, ST730X_DEFINE_DEVICE, &st7305_specifics)
+DT_FOREACH_STATUS_OKAY_VARGS(sitronix_st7306, ST730X_DEFINE_DEVICE, &st7306_specifics)

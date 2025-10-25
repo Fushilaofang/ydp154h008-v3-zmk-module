@@ -10,27 +10,9 @@ description: |
     necessitate rounding X axis values to 12, including width which sometimes need
     to be rounded to the next multiple of 12 to fill the display.
 
-include: [spi-device.yaml, display-controller.yaml]
+include: [mipi-dbi-spi-device.yaml, display-controller.yaml]
 
 properties:
-  width:
-    type: int
-    required: true
-    description: Display width in pixels. Must be a multiple of 12 for ST730x controllers.
-
-  height:
-    type: int
-    required: true
-    description: Display height in pixels.
-
-  cmd-data-gpios:
-    type: phandle-array
-    description: GPIO for command/data selection (DC pin)
-
-  reset-gpios:
-    type: phandle-array
-    description: GPIO for reset control
-
   start-line:
     type: int
     required: true

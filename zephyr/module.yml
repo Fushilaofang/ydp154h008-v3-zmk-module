@@ -3,5 +3,4 @@ build:
   cmake: .
   kconfig: Kconfig
   settings:
-    drivers_root: .
     dts_root: .

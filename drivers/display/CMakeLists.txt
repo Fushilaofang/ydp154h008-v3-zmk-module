@@ -1,6 +1,7 @@
 zephyr_library_amend()
 set_source_files_properties(
     ${ZEPHYR_BASE}/drivers/display/display_st730x.c
+    TARGET_DIRECTORY ${lib_name}
     PROPERTIES HEADER_FILE_ONLY ON
 )
 
